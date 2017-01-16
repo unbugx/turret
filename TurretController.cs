@@ -15,13 +15,24 @@ public class TurretController : MonoBehaviour
 	public int rotationSpeed;
 	//Тег, который присвоен объектам, являющимися потенциальными целям для турели
 	public string enemyTag = "Enemy";
-	//Турель будет самостоятельно выбирать ближайшую цель для атаки, 
+	//Префаб снаряда
+	public GameObject projectile;
+	//скорость снаряда
+	public int projectileSpeed = 10;
+	private bool allowFire = true;
+	//Периодичность стрельбы
+	public float fireRate = 1.0f;
+	//Турель будет самостоятельно выбирать ближайшую цель для атаки,
 	//поиск цели будет осуществлен с помощью корутина 1 раз в searchTimeDelay секунд
 	private float searchTimeDelay = 1f;
 	//Текущая цель турели
 	private Transform target;
+	//Предыдущее положение цели
+	private Vector3 previousTargetPosition;
+	//Скорость цели
+	private Vector3 targetSpeed;
 	//возможные состояния турели
-	protected enum State 
+	protected enum State
 	{
 		Idle,		//состояние покоя
 		Atack,		//цель найдена, атакуем
@@ -42,11 +53,22 @@ public class TurretController : MonoBehaviour
 		//Идея реализации подсмотрена тут http://playmedusa.com/blog/simple-fsm-like-structure-with-coroutines-in-c-unity3d/
 		StartCoroutine(FSM());
 	}
+
+	public virtual void Update() {
+	    //Каждый кадр сохраняем текущее положение цели
+		previousTargetPosition = target.position;
+	}
+
+	public virtual void LateUpdate() {
+        //В конце каждого кадра высчитываем скорость цели
+		targetSpeed = (target.position - previousTargetPosition) / Time.deltaTime;
+	}
+
 	//Finite State Machine
 	//Реализация, без ООП, зато понятная и легко реализуемая, основана на корутинах
 	protected virtual IEnumerator FSM()
 	{
-		while (true) 
+		while (true)
 		{
 			yield return StartCoroutine(state.ToString());
 		}
@@ -62,10 +84,10 @@ public class TurretController : MonoBehaviour
 		{
 			yield return null;
 		}
-		//Покидаем цикл как только была найдена цель, перед переходом в состояние атаки 
+		//Покидаем цикл как только была найдена цель, перед переходом в состояние атаки
 		//можем выполнить еще какие-то действия и поставить нужную задержку
 		//yield return null;
-		
+
 		//Переводим турель в состоянии атаки
 		state = State.Atack;
 		//yield return null;
@@ -79,11 +101,8 @@ public class TurretController : MonoBehaviour
 		//Пока цель не потеряна, осуществляем поворот башни и наведени пушки на цель
 		while(target)
 		{
-			//По умолчанию турель стреляет прямо по цели, но, если цель движется, то нужно высчитать точку,
-			//которая находится перед движущейся целью и по которой будет стрелять турель. 
-			//То есть турель должна стрелять на опережение, но этот вариант пока не рассматривается, 
-			//targetingPosition - просто местоположение текущей цели
-			targetingPosition = target.position;
+		    //Получаем точку, по которой нужно произвести выстрел, чтобы попасть по движущейся цели
+			targetingPosition = CalculateAim();
 
 			//поворот башни к цели
 			Vector3 directionTurretToTarget = targetingPosition - turretHead.position;
@@ -118,6 +137,9 @@ public class TurretController : MonoBehaviour
 				Mathf.Min(1f, Time.deltaTime * rotationSpeed / angleGun)
 			);
 
+			//Выстрел
+			Shot();
+
 			yield return null;
 		}
 		//Покидаем цикл как только цель была потеряна, перед переходом в состояние покоя 
@@ -129,6 +151,51 @@ public class TurretController : MonoBehaviour
 		//yield return null;
 	}
 
+	public virtual void Shot() {
+		//если можем сделать выстрел, то стреляем
+		if (allowFire) {
+			//для выстрела используем StartCoroutine, которая устанавливает allowFire в true с учетом скорострельности
+			StartCoroutine(Fire());
+		}
+	}
+
+	protected virtual IEnumerator Fire() {
+		//запрещаем делать следующий выстрел
+		allowFire = false;
+
+		GameObject projectileItem = Instantiate(
+			projectile,
+			turretGun.position,
+			Quaternion.FromToRotation (projectile.transform.forward, turretGun.forward)
+		) as GameObject;
+
+		BulletController projectileController = projectileItem.GetComponent<BulletController>();
+		projectileController.speed = projectileSpeed;
+
+		//следующий выстрел можно будет произвести спустя fireRate секунд
+		yield return new WaitForSeconds (fireRate);
+
+		//разрешаем сделать следующий выстрел
+		allowFire = true;
+	}
+
+	protected virtual Vector3 CalculateAim() {
+		//По умолчанию турель стреляет прямо по цели, но, если цель движется, то нужно высчитать точку,
+		//которая находится перед движущейся целью и по которой будет стрелять турель.
+		//То есть турель должна стрелять на опережение
+		targetingPosition = target.position;
+
+		//Высчитываем точку, перед мишенью, по которой нужно произвести выстрел, чтобы попасть по движущейся мишени
+		//по идее, чем больше итераций, тем точнее будет положение точки для упреждающего выстрела
+		for (int i = 0; i < 10; i++) {
+			float dist = (turretGun.position - targetingPosition).magnitude;
+			float timeToTarget = dist / projectileSpeed;
+			targetingPosition = target.position + targetSpeed * timeToTarget;
+		}
+
+		return targetingPosition;
+	}
+
 	protected virtual IEnumerator FindClosestTarget()
 	{
 		while(true)
@@ -138,15 +205,15 @@ public class TurretController : MonoBehaviour
 			GameObject[] targets = GameObject.FindGameObjectsWithTag(enemyTag);
 			//Квадрат радиуса обзора, это значение потребуется при поиске ближайшей цели
 			float distance = sqrVisionRadius;
-			foreach (GameObject go in targets) 
+			foreach (GameObject go in targets)
 			{
 				//Находим расстояние между турелью и предполагаемой целью
 				Vector3 diff = go.transform.position - transform.position;
-				//С точки зрения производительности быстрее сравнить квадраты расстояний, 
+				//С точки зрения производительности быстрее сравнить квадраты расстояний,
 				//чем делать лишнюю операцию извлечения квадратного корня
 				float curDistance = diff.sqrMagnitude;
 				//если найдена цель в радиусе поражения, то запоминаем её
-				if (curDistance < distance) 
+				if (curDistance < distance)
 				{
 					closest = go.transform;
 					distance = curDistance;
